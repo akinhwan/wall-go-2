@@ -1,5 +1,5 @@
 /* Cache only the game shell, never online room traffic. */
-const CACHE='wallgo-shell-v4';
+const CACHE='wallgo-shell-v5';
 const ASSETS=['/','/index.html','/style.css','/rules.js','/app.js','/i18n.js','/socket.io/socket.io.js'];
 self.addEventListener('install',event=>{
   event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(ASSETS.map(url=>new Request(url,{cache:'reload'})))).then(()=>self.skipWaiting()));

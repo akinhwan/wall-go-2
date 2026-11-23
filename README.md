@@ -32,11 +32,11 @@ This updated version recreates the close-up board aesthetic shown in the episode
 - Pink/rose beveled 7×7 tiles recessed into dark grooves, inside a metallic board frame
 - Electric blue, lemon-yellow and neon-pink wall segments with acrylic highlights
 - Concentric-line ceramic square and circular counters, with highlights and shadows
-- Steel-blue textured playing platform and decorative side/top stacks of wall pieces
+- Steel-blue textured playing platform
 - Clear move destinations, selected counter treatments, wall placement options and live territory tinting
 - Responsive layout for both desktop and phone browsers
 
-The visual design is original SVG and CSS artwork — **no photographs or screenshot images are used as the live board background**. Wall-piece stacks around the playing surface are decorative, not limited inventory counters. A static preview is in `assets/arena-board-preview.png`.
+The visual design uses original SVG and CSS artwork.
 
 ## Touch and fullscreen board
 
@@ -46,7 +46,7 @@ During wall placement, tap a highlighted edge or use the large **Top / Bottom / 
 
 ## Local Duel and offline play
 
-Choose **Local Duel** on the home screen for two players sharing this device. No name, account, room, or connection is needed. The current player is shown above the board and highlighted on the scoreboard. Place squares in 1–2–2–1 order, then alternate full move-and-wall turns. New Game / Restart and Mode Selection are available throughout; leaving an unfinished game asks for confirmation.
+Choose a format under **Local game format** on the home screen to share one device. The standard duel, Breaker Duel, and four-player match are available offline. The current player is shown above the board and highlighted on the scoreboard. New Game / Restart and Mode Selection are available throughout.
 
 The browser and server use the exact same engine in `public/rules.js`; `server/rules.js` re-exports it. Local play also uses the 90-second clock and timeout completion, territory scoring, tie breakers and stalemate behavior. Local games are kept in memory; reloading starts at mode selection.
 
@@ -57,6 +57,12 @@ Once the page reports **Ready for offline local play and reload**, its service w
 **3-player tournament**: each player receives one round and one square counter. Players place them in snake order (1-2-3-3-2-1). The game ends when all differently owned pieces are separated by walls; the highest score survives and the other two play the final. Each player has a once-per-game wall breaker during this round.
 
 **2-player duel/final**: each player has 2 square and 2 round counters. The 2 circular counters begin at a symmetric fixed position for each side. The remaining 4 squares are placed 1-2-2-1. Wall breakers are disabled. A standalone 2-player quick match is also available.
+
+**2-player Breaker Duel** uses the same duel setup and gives each player one wall breaker for the match.
+
+**4-player match** is one round on the same 7×7 board. Each player gets one square, one round counter, and one wall breaker. Place counters in 1–2–3–4–4–3–2–1 order. The highest territory score wins using the standard tie-break rules.
+
+**Undo and History** are available next to the board. Undo steps back one placement, move, or wall at a time, including automated actions. Undoing a move that broke a wall restores the wall and the breaker. Undo across the start of a tournament final returns to the completed qualifier. The host controls undo for an online room. History shows the current sequence of actions, starting from the opening of the current match. Restart or rematch starts a fresh history.
 
 **Move rules**: squares move exactly 1 or 2 cells in one of the four cardinal directions; circles move 1 cardinal cell, optionally followed by 1 perpendicular cell. Paths cannot cross occupied cells, board boundaries, or existing walls (unless consuming a breaker). Then build exactly one wall beside the moved piece. Walls apply to all players.
 
@@ -79,4 +85,4 @@ Play from different browsers/devices, or use incognito windows for local testing
 
 ## Future extensions
 
-Database persistence, ranked matchmaking, spectator replay, move history timeline, alternate opening presets, clocks during placement, AI players, and account profiles can all be added without changing core movement/territory rules.
+Database persistence, ranked matchmaking, spectator replay, alternate opening presets, clocks during placement, AI players, and account profiles can all be added without changing core movement/territory rules.

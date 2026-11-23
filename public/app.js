@@ -3,16 +3,22 @@
   'use strict';
   const socket = typeof io === 'function' ? io({autoConnect:false,reconnection:true}) : {connected:false,on(){},emit(){},connect(){},disconnect(){}};
   const rules = globalThis.WallGoRules;
-  const COLORS = ['#168cfb','#ffe440','#ff3978'];
-  const COLOR_NAMES = ['Blue','Yellow','Red'];
+  const COLORS = ['#168cfb','#ffe440','#ff3978','#36e5a3'];
+  const COLOR_NAMES = ['Blue','Yellow','Pink','Green'];
+  const FORMAT_LABELS = {
+    duel: ['2-Player Duel','Head-to-head'],
+    'breaker-duel': ['2-Player Breaker Duel','One wall breaker each'],
+    tournament: ['3-Player Match','Qualifier + final'],
+    'four-player': ['4-Player Match','One wall breaker each'],
+  };
   const ICONS = {circle:'●',square:'■'};
   const query = new URLSearchParams(location.search);
   const initialCode = (query.get('room')||'').toUpperCase().replace(/[^A-Z2-9]/g,'').slice(0,6);
   const ui = {
     focus:false, boardFull:false, local:false, room:null, id:null, token:null, role:null, code:initialCode,
     name:localStorage.getItem('wallgo-name')||'', joinCode:initialCode,
-    format:'tournament',selected:null,kind:'square',breakMode:false,pathChoices:null,
-    rules:false,toast:'',chatDraft:'',phaseKey:'',clockOffset:0,connected:false
+    format:'tournament',localFormat:'duel',selected:null,kind:'square',breakMode:false,pathChoices:null,showHistory:false,
+    rules:false,toast:'',chatDraft:'',phaseKey:'',clockOffset:0,connected:false,offlineReady:false
   };
   const app = document.getElementById('app');
   const escape = s => String(s??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
@@ -21,7 +27,7 @@
   const isHost = () => ui.id && ui.room?.hostId===ui.id;
   const myTurn = () => ui.room?.stage==='active' && ui.room.currentId===ui.id;
   const getColor = id => COLORS[playerById(id)?.color??0];
-  const cap = () => ui.room?.format==='duel'?2:3;
+  const cap = () => rules.formatConfig(ui.room.format).players;
   const wallChoices = (g,r,c) => {
     if(!g) return [];
     const keys=[r>0?`h:${r}:${c}`:null,r<6?`h:${r+1}:${c}`:null,c>0?`v:${r}:${c}`:null,c<6?`v:${r}:${c+1}`:null];
@@ -39,24 +45,32 @@
     const r=ui.room,g=r.game;
     r.currentId=rules.activePlayer(g);
     r.stage=g.phase==='finished'?'complete':'active';
+    r.canUndo=rules.canUndo(g);
     r.legal=rules.optionsForTurn(g);r.territory=rules.territories(g);
     ui.id=r.currentId||r.hostId;ui.selected=null;ui.pathChoices=null;ui.breakMode=false;
     ui.clockOffset=0;render();
   }
   const touchLayout = () => globalThis.matchMedia?.('(max-width: 810px), (pointer: coarse)').matches || false;
-  function startLocal() {
+  function startLocal(format = ui.room?.format || ui.localFormat) {
     ui.focus=touchLayout();
+    ui.showHistory=false;
     socket.disconnect();ui.local=true;ui.code='';ui.role='player';
-    const players=[{id:'local-blue',name:'Player 1 · Blue',color:0,connected:true},
-      {id:'local-pink',name:'Player 2 · Pink',color:2,connected:true}];
-    ui.room={code:'LOCAL',format:'duel',stage:'active',players,hostId:players[0].id,
-      game:rules.makeGame(players,'duel'),chat:[],spectatorCount:0};
+    const colors=rules.formatConfig(format).players===2 ? [0,2] : [0,1,2,3];
+    const players=colors.map((color,index)=>({
+      id:`local-${index+1}`,name:`Player ${index+1} · ${COLOR_NAMES[color]}`,color,connected:true,
+    }));
+    ui.room={code:'LOCAL',format,stage:'active',players,hostId:players[0].id,
+      game:rules.makeGame(players,format),chat:[],spectatorCount:0};
     history.replaceState({},'','/');syncLocal();
   }
   function send(event,data={},done) {
     if(ui.local) {
       try {
         if(event==='room:rematch'){startLocal();return;}
+        if(event==='room:undo'){
+          if(rules.undoAction(ui.room.game))syncLocal();
+          return;
+        }
         if(event!=='room:act')return;
         const g=ui.room.game,owner=rules.activePlayer(g);
         if(data.type==='place')rules.placePiece(g,owner,data.kind,data.r,data.c);
@@ -66,13 +80,14 @@
       } catch(error){notify(error.message);}
       return;
     }
-    if(!socket.connected){if(navigator.onLine===false){notify('Online rooms need a connection. Local Duel is available offline.');return;}socket.once('connect',()=>send(event,data,done));socket.connect();notify('Connecting to online multiplayer…');return;}
+    if(!socket.connected){if(navigator.onLine===false){notify('Online rooms need a connection. Local play is available offline.');return;}socket.once('connect',()=>send(event,data,done));socket.connect();notify('Connecting to online multiplayer…');return;}
     socket.emit(event,data,reply=>{
       if(!reply?.ok){notify(reply?.error||'Request failed');return;}
       if(done)done(reply);
     });
   }
   function onJoined(reply) {
+    ui.showHistory=false;
     ui.focus=reply.state?.stage==='active' && touchLayout();
     ui.local=false;ui.role=reply.role;ui.id=reply.id;ui.token=reply.token;ui.code=reply.code;
     ui.room=reply.state;
@@ -109,11 +124,15 @@
   function header() {
     return `<header class="topbar"><div class="container top-inner">
       <a class="logo" href="/" data-action="home" aria-label="Wall Go II home"><span class="logo-korean" lang="ko">벽바둑</span> <em>II</em><span class="logo-divider"></span><span class="logo-english">WALL / GO</span></a>
-      <div class="top-right"><button class="plain-link" data-action="language" aria-label="Change language">English / 한국어</button><span class="tag"><i></i>${ui.local?'LOCAL DUEL · OFFLINE':ui.room?'PRIVATE GAME':'CHOOSE YOUR MODE'}</span>
+      <div class="top-right"><button class="plain-link" data-action="language" aria-label="Change language">English / 한국어</button><span class="tag"><i></i>${ui.local?'LOCAL PLAY · OFFLINE':ui.room?'PRIVATE GAME':'CHOOSE YOUR MODE'}</span>
         <button class="plain-link" data-action="rules">HOW TO PLAY</button></div></div></header>`;
   }
   function footer() {
     return `<footer class="footer"><div class="container footer-inner"><span>WALL / GO II · FAN-MADE UNOFFICIAL RECREATION</span><span>Inspired by The Devil's Plan · Not affiliated with Netflix</span></div></footer>`;
+  }
+  function formatOption(format,active) {
+    const [label,description]=FORMAT_LABELS[format];
+    return `<button class="format-option ${active?'active':''}" data-action="format" data-format="${format}" aria-pressed="${active}"><span class="format-dot"></span><span><b>${label}</b><small>${description}</small></span></button>`;
   }
   function home() {
     return `<main class="main-home"><div class="container home-layout">
@@ -121,14 +140,18 @@
         <div class="eyebrow">THE DEVIL’S PLAN · INSPIRED STRATEGY GAME</div>
         <h1 class="headline">BUILD THE<br/><strong>BOUNDARY.</strong></h1>
         <p class="intro">Every move changes the map. Build walls, cut off your rivals, and claim the largest territory in this deceptively simple strategy game.</p>
-        <div class="feature-row"><span class="feature"><span>✦</span> 2–3 Players</span><span class="feature"><span>◈</span> Real-time rooms</span><span class="feature"><span>◷</span> 90s turns</span></div>
+        <div class="feature-row"><span class="feature"><span>✦</span> 2–4 Players</span><span class="feature"><span>◈</span> Real-time rooms</span><span class="feature"><span>◷</span> 90s turns</span></div>
         <section class="home-forms" aria-label="Create or join a game">
-          <button class="btn primary full" data-action="local">LOCAL DUEL</button><p class="action-desc">2 players · same device · offline · no accounts</p><p class="action-desc" id="offline-status">Load once for local play. Offline reload is available when the app cache is ready.</p><div class="divider-label">Online multiplayer</div>
+          <label class="form-label" for="local-format">Local game format</label>
+          <select class="text-input local-format" id="local-format">
+            ${['duel','breaker-duel','four-player'].map(format=>`<option value="${format}" ${format===ui.localFormat?'selected':''}>${FORMAT_LABELS[format][0]}</option>`).join('')}
+          </select>
+          <button class="btn primary full" data-action="local">${ui.localFormat==='duel'?'LOCAL DUEL':'START LOCAL GAME'}</button>
+          <p class="action-desc">Same device · offline · no accounts</p><p class="action-desc" id="offline-status">${ui.offlineReady?'Ready for offline local play and reload.':'Load once for local play. Offline reload is available when the app cache is ready.'}</p><div class="divider-label">Online multiplayer</div>
           <label class="form-label" for="home-name">Your player name</label>
           <input class="text-input" id="home-name" maxlength="24" value="${escape(ui.name)}" placeholder="Enter your name" autocomplete="nickname" />
           <div class="format-picker">
-            <button class="format-option ${ui.format==='tournament'?'active':''}" data-action="format" data-format="tournament"><span class="format-dot"></span><span><b>3-Player Match</b><small>Qualifier + final</small></span></button>
-            <button class="format-option ${ui.format==='duel'?'active':''}" data-action="format" data-format="duel"><span class="format-dot"></span><span><b>2-Player Duel</b><small>Head-to-head</small></span></button>
+            ${['tournament','duel','four-player','breaker-duel'].map(format=>formatOption(format,format===ui.format)).join('')}
           </div>
           <button class="btn primary full" data-action="create">CREATE PRIVATE ROOM <span>→</span></button>
           <div class="divider-label">or join a friend</div>
@@ -251,12 +274,12 @@
     const x1=M+col*T+10,y=M+row*T;return [x1,y,x1+T-20,y];
   }
   function roomHeader() {
-    if(ui.local)return `<div class="room-top"><div><div class="overline">LOCAL DUEL · SAME DEVICE · OFFLINE</div><h2>Two players. One arena.</h2><p>No accounts or connection required.</p></div><div class="room-actions"><button class="btn small" data-action="local-restart">NEW GAME / RESTART</button><button class="btn ghost small" data-action="home">MODE SELECTION</button></div></div>`;
-
     const r=ui.room;
-    return `<div class="room-top"><div><div class="eyebrow">${r.stage==='lobby'?'Private match lobby':r.format==='duel'?'Head-to-head showdown':'Three-player elimination'}</div>
+    const [label,description]=FORMAT_LABELS[r.format];
+    if(ui.local)return `<div class="room-top"><div><div class="overline">SAME DEVICE · OFFLINE</div><h2>${label}</h2><p>${description}</p></div><div class="room-actions"><button class="btn small" data-action="local-restart">NEW GAME / RESTART</button><button class="btn ghost small" data-action="home">MODE SELECTION</button></div></div>`;
+    return `<div class="room-top"><div><div class="eyebrow">${label}</div>
       <h2>${r.stage==='lobby'?'Your room is ready.':r.game?.round===2?'The final showdown.':'The arena awaits.'}</h2>
-      <p>${r.stage==='lobby'?'Invite your opponents to begin.':`${r.game?.round===2?'FINAL ROUND':r.format==='duel'?'DUEL':'ROUND ONE'} · 7 × 7 ARENA · ${r.players.length} REGISTERED PLAYERS`}</p></div>
+      <p>${r.stage==='lobby'?'Invite your opponents to begin.':r.game?.round===2?'FINAL ROUND':description}</p></div>
       <div class="room-actions"><span class="room-code" title="Room code">${escape(r.code)}</span><button class="btn ghost small" data-action="share">↗ INVITE</button></div></div>`;
   }
   function formatClock() {
@@ -284,7 +307,10 @@
       desc=myTurn()?'Tap any glowing edge beside your moved counter.':'Waiting for the turn’s finishing wall.';
       timed=true;
     }else {label='Final result';head='Territory determined';desc='All counters are isolated; the match is complete.';}
-    if(ui.local && r.stage==='active'){label=`${playerById(r.currentId)?.name} · ${label}`;head=g.phase==='placement'?'Place a square':g.phase==='wall'?'Build one wall':'Choose your next move';}
+    if(ui.local && r.stage==='active'){
+      label=`${playerById(r.currentId)?.name} · ${label}`;
+      if(g.phase==='placement' && g.activeIds.length===2)head='Place a square';
+    }
     return `<div class="panel status-panel"><div><div class="overline">${escape(label)}</div><div class="status-heading">${escape(head)}</div><p class="status-desc">${escape(desc)}</p></div>
       ${timed?`<div class="clock" id="timer"><strong id="clock-text">${formatClock()}</strong><small>SECONDS LEFT</small><div class="timer-track"><span id="clock-bar" style="width:100%"></span></div></div>`:''}</div>`;
   }
@@ -313,11 +339,11 @@
         <button data-action="kind" data-kind="circle" class="${selected==='circle'?'active':''}" ${myKinds.includes('circle')?'disabled':''}><i class="mini-counter circle"></i> ROUND</button></div>`:''}</div>`;
     }
     if(g.phase==='move') {
-      const canBreak=g.activeIds.length===3 && myTurn() && !g.breakersUsed[ui.id];
+      const canBreak=myTurn() && rules.canUseBreaker(g,ui.id);
       const selected=g.pieces.find(p=>p.id===ui.selected);
       const chosen=selected?.kind==='circle'?'ROUND':'SQUARE';
       return `<div class="panel action-tray"><div class="action-desc"><b>${myTurn()?(selected?`${chosen} COUNTER SELECTED`:'YOUR TURN'):'Watch the board'}</b><br/>
-      ${myTurn()?(ui.breakMode?'Choose a red-marked destination to break a wall.':selected?'Choose any glowing destination.':'Tap either of your counters to see available moves.'): 'Every turn consists of moving one counter and building one wall.'}</div>
+      ${myTurn()?(ui.breakMode?'Choose a red-marked destination to break a wall.':selected?'Choose any glowing destination.':'Tap one of your counters to see available moves.'): 'Every turn consists of moving one counter and building one wall.'}</div>
       <div class="tray-controls">${canBreak?`<button class="breaker-btn ${ui.breakMode?'active':''}" data-action="breaker">${ui.breakMode?'✕ EXIT BREAK MODE':'⚒ USE WALL BREAKER'}</button>`:''}
       ${ui.selected&&myTurn()?'<button class="btn small ghost" data-action="cancel">CLEAR</button>':''}</div></div>`;
     }
@@ -334,7 +360,7 @@
       const gameWon=g?.phase==='finished'&&g.result?.winners.includes(p.id);
       const small=ui.local?(active?'CURRENT PLAYER':'PLAYER') :p.id===ui.id?'YOU':waiting?'SAFE':!playing?'SAFE':!p.connected?'OFFLINE':active?'PLAYING':gameWon?'LEADER':'PLAYER';
       return `<div class="player-row ${active?'active':''}"><span class="player-icon" style="background:${COLORS[p.color]};">${i+1}</span>
-      <div class="player-meta"><strong>${escape(p.name)} ${p.id===r.hostId?'♛':''}</strong><small><i class="online-dot ${p.connected?'':'off'}"></i>${small}${g && g.activeIds.length===3 ? ` · ${g.breakersUsed[p.id]?'BREAKER USED':'BREAKER READY'}`:''}</small></div>
+      <div class="player-meta"><strong>${escape(p.name)} ${p.id===r.hostId?'♛':''}</strong><small><i class="online-dot ${p.connected?'':'off'}"></i>${small}${playing && g?.wallBreakers ? ` · ${g.breakersUsed[p.id]?'BREAKER USED':'BREAKER READY'}`:''}</small></div>
       <div class="score-number">${playing?(score[p.id]??0):(r.firstRound?.score[p.id]??0)}<span>SECURED</span></div></div>`;
     }).join('');
   }
@@ -373,10 +399,20 @@
       <button class="btn ghost full small" data-action="rules" style="margin-top:14px">VIEW COMPLETE RULES →</button></div>
     </aside>`;
   }
+  function gameTools() {
+    if(!ui.room.game)return '';
+    const undo = ui.local || isHost()
+      ? `<button class="btn ghost small" data-action="undo" ${ui.room.canUndo?'':'disabled'}>Undo</button>`
+      : '';
+    return `${undo}<button class="btn ghost small" data-action="history" aria-haspopup="dialog">History</button>`;
+  }
   function focusedRoom() {
     const r=ui.room,g=r.game;
     return `<main class="focus-screen" aria-label="Fullscreen game board">
-      <div class="focus-header"><div class="focus-toolbar"><strong style="color:${getColor(r.currentId||r.hostId)}">${escape(playerById(r.currentId)?.name||'Match complete')}</strong><button class="btn small" data-action="board-focus">EXIT FULLSCREEN</button></div>${statusPanel()}</div>
+      <div class="focus-header"><div class="focus-toolbar">
+        <strong style="color:${getColor(r.currentId||r.hostId)}">${escape(playerById(r.currentId)?.name||'Match complete')}</strong>
+        <div class="board-tools">${gameTools()}<button class="btn small" data-action="board-focus">EXIT FULLSCREEN</button></div>
+      </div>${statusPanel()}</div>
       <div class="focus-stage"><div class="board-frame">${boardSvg(g)}</div></div>
       <div class="focus-controls">${g?.result?resultPanel():''}${tray()}</div>
     </main>`;
@@ -386,13 +422,59 @@
     const r=ui.room;
     const g=r.game||previewGame();
     return `<main class="game-content"><div class="container">${roomHeader()}${r.game?'<button class="btn board-expand" data-action="board-focus">FULLSCREEN BOARD</button>':''}
-      <div class="game-grid"><div class="game-center ${ui.boardFull?'board-full':''}"><button class="btn small board-toggle" data-action="board-full">${ui.boardFull?'EXIT FULL SCREEN / 전체 화면 닫기':'FULL SCREEN / 전체 화면'}</button>${statusPanel()}
+      <div class="game-grid"><div class="game-center ${ui.boardFull?'board-full':''}">
+        <div class="board-tools"><button class="btn small board-toggle" data-action="board-full">${ui.boardFull?'EXIT FULL SCREEN / 전체 화면 닫기':'FULL SCREEN / 전체 화면'}</button>${gameTools()}</div>${statusPanel()}
         <div class="board-wrap"><div class="arena-brand"><span>THE STRATEGY ARENA</span><strong lang="ko">벽바둑 <em>II</em></strong><span>07 × 07</span></div>
-        <div class="arena-top-rack" aria-hidden="true">${Array.from({length:14},()=>'<i></i>').join('')}</div>
-        <div class="arena-layout"><div class="arena-rack arena-rack-blue" aria-hidden="true">${Array.from({length:16},()=>'<i></i>').join('')}</div><div class="board-frame">${boardSvg(g, r.stage==='lobby')}</div><div class="arena-rack arena-rack-red" aria-hidden="true">${Array.from({length:16},()=>'<i></i>').join('')}</div></div>
+        <div class="board-frame">${boardSvg(g, r.stage==='lobby')}</div>
         <p class="board-help">${r.stage==='lobby'?'The board will unlock when the match begins.':`Tap counters and highlighted squares · Player colors mark built walls · ${r.stage==='active'?'Live turns':'Match over'}`}</p></div>
         ${tray()}
       </div>${sidebar()}</div></div></main>`;
+  }
+  const coordinate = ({r,c}) => `(${r+1}, ${c+1})`;
+  function wallLocation(key) {
+    const [axis,row,column]=key.split(':');
+    const [r,c]=[Number(row),Number(column)];
+    const neighbor = axis==='h' ? {r:r-1,c} : {r,c:c-1};
+    return `${coordinate(neighbor)} / ${coordinate({r,c})}`;
+  }
+  function historyDescription(action) {
+    switch(action.kind) {
+      case 'place': return `Placed ${action.pieceKind==='circle'?'a round counter':'a square counter'} at ${coordinate(action)}`;
+      case 'move': return `Moved ${coordinate(action.from)} to ${coordinate(action.to)}${action.broken?` · Broke wall ${wallLocation(action.broken)}`:''}`;
+      case 'wall': return `Built wall ${wallLocation(action.key)}`;
+      case 'skip': return 'Skipped · no legal move';
+      case 'timeout': return 'Turn completed on timeout';
+      case 'finish': return 'Round finished';
+      default: return '';
+    }
+  }
+  function historyList(actions) {
+    if(!actions.length)return '<p>No actions yet.</p>';
+    return `<ol reversed class="action-history">${actions.slice().reverse().map(action=>{
+      let name=playerById(action.owner)?.name;
+      if(ui.local && name)name=globalThis.wallgoTranslate?.(name)||name;
+      const player=name?`<b class="history-player" style="color:${getColor(action.owner)}">${escape(name)}</b> `:'';
+      return `<li>${player}<span>${escape(historyDescription(action))}</span></li>`;
+    }).join('')}</ol>`;
+  }
+  function historyModal() {
+    if(!ui.showHistory || !ui.room?.game)return '';
+    const {game,qualifierHistory}=ui.room;
+    return `<div class="modal-backdrop history-backdrop" data-action="close-history">
+      <div class="modal history-modal" role="dialog" aria-modal="true" aria-labelledby="history-title">
+        <div class="modal-heading"><h2 id="history-title">Action history</h2><button class="close" data-action="close-history">CLOSE ✕</button></div>
+        <p>Latest actions first. Board coordinates are (row, column).</p>
+        ${ui.local?'':'<p>The host can undo actions for the entire room.</p>'}
+        ${qualifierHistory?'<h3>Final round</h3>':''}${historyList(game.history)}
+        ${qualifierHistory?`<h3>Qualifier</h3>${historyList(qualifierHistory)}`:''}
+      </div>
+    </div>`;
+  }
+  function toggleHistory(open) {
+    ui.showHistory=open;
+    render();
+    const selector=open?'.history-modal button':'[data-action="history"]';
+    document.querySelector(selector)?.focus();
   }
   function rulesModal() {
     if(!ui.rules)return '';
@@ -400,10 +482,10 @@
       <div class="modal-heading"><h2>How to play</h2><button class="close" data-action="close-rules">CLOSE ✕</button></div>
       <div class="overline">WALL GO II / 벽바둑 II</div>
       <h3>01 · The goal</h3><p>Claim the largest area of the 7×7 board. A territory is a group of squares enclosed by walls and the outer board edge, containing counters from exactly one player. Different isolated territories belonging to one player are added together.</p>
-      <h3>02 · Counter setup</h3><p>In the three-player qualifier, every player has one square and one circle. Players place one counter in seat order (1–2–3), then their remaining counter in reverse order (3–2–1). In the two-player duel, each player has two squares and two circles: the circles begin at fixed positions, and the squares are placed in 1–2–2–1 order.</p>
+      <h3>02 · Counter setup</h3><p>In three- and four-player games, everyone places one square and one circle. Place the first counter in seat order, then place the remaining counter in reverse order. In both duel formats, each player has two squares and two circles. The circles begin at fixed positions, and the squares are placed in 1–2–2–1 order.</p>
       <h3>03 · Moving counters</h3><p>Move one counter each turn. <b>Square:</b> 1 or 2 cells in a straight line up, down, left, or right. <b>Circle:</b> 1 cell orthogonally, optionally followed by a single perpendicular step (left or right). You may not pass through occupied cells, move onto a counter, cross a standing wall, or remain in place.</p>
       <h3>04 · Building walls</h3><p>After moving, build exactly one wall on an unoccupied internal edge of the cell where your counter lands. Walls block everyone, including their builder. You cannot build a second wall over an existing wall.</p>
-      <h3>05 · Breaking a wall</h3><p>In the three-player qualifier only, each player can break exactly one wall during a movement. The broken wall must lie on the actual path being traveled. Activate your wall breaker before selecting a legal breaking move. Breakers are <b>not permitted</b> in the two-player final.</p>
+      <h3>05 · Breaking a wall</h3><p>In the Breaker Duel, the three-player qualifier, and the four-player match, each player can break one wall per game. Activate your wall breaker and choose a route that crosses the wall. The classic duel and the tournament final use standard movement.</p>
       <h3>06 · Ending and scoring</h3><p>The round ends when the areas occupied by different players have become separated by walls. Count every cell in an isolated area containing only one player's counters. Areas with no counters score zero. Highest total wins; a tie is broken by the largest single occupied territory. In a three-player match, the round-one winner is safe and the remaining two face off.</p>
       <h3>07 · Time limit</h3><p>Players have 90 seconds to move and build their wall. On timeout, both local and online modes automatically completes a random legal move and wall (or automatically builds the wall if the piece has already moved). This keeps real-time rooms moving even if somebody disconnects.</p>
       <div class="notice">An independent fan-built implementation of rules shown on <em>The Devil’s Plan</em>, Season 3, Episode 10. The two-player circular starting coordinates are a symmetric default and can be adjusted to match further reference images.</div>
@@ -417,8 +499,11 @@
   }
   function render() {
     const page=ui.room?roomScreen():home();
-    app.innerHTML=`<div class="app-shell ${ui.focus&&ui.room?'board-focused':''}">${header()}${page}${footer()}</div>${rulesModal()}${pathModal()}${ui.toast?`<div class="toast" role="status">${escape(ui.toast)}</div>`:''}`;
+    const historyScroll=document.querySelector('.history-modal')?.scrollTop;
+    app.innerHTML=`<div class="app-shell ${ui.focus&&ui.room?'board-focused':''}" ${ui.showHistory?'inert':''}>${header()}${page}${footer()}</div>${rulesModal()}${pathModal()}${historyModal()}${ui.toast?`<div class="toast" role="status">${escape(ui.toast)}</div>`:''}`;
     globalThis.wallgoLocalize?.(app);
+    const historyPanel=document.querySelector('.history-modal');
+    if(historyPanel && historyScroll!==undefined)historyPanel.scrollTop=historyScroll;
     const log=document.getElementById('chat-log');if(log)log.scrollTop=log.scrollHeight;
     updateTimer();
   }
@@ -460,6 +545,13 @@
     if(e.target.id==='join-code')ui.joinCode=e.target.value.toUpperCase().replace(/[^A-Z2-9]/g,'');
     if(e.target.id==='chat-message')ui.chatDraft=e.target.value;
   });
+  document.addEventListener('change',e=>{
+    if(e.target.id!=='local-format')return;
+    ui.localFormat=e.target.value;
+    const label=ui.localFormat==='duel'?'LOCAL DUEL':'START LOCAL GAME';
+    const startButton=document.querySelector('[data-action="local"]');
+    if(startButton)startButton.textContent=globalThis.wallgoTranslate?.(label)||label;
+  });
   document.addEventListener('submit',e=>{
     if(e.target.id!=='chat-form')return;e.preventDefault();
     const msg=ui.chatDraft.trim();if(!msg)return;
@@ -469,6 +561,7 @@
     if(!document.fullscreenElement && ui.focus){ui.focus=false;render();}
   });
   document.addEventListener('keydown',e=>{
+    if(e.key==='Escape' && ui.showHistory){toggleHistory(false);return;}
     if(e.key==='Escape' && ui.focus && !ui.rules && !ui.pathChoices){ui.focus=false;render();return;}
     if(e.key==='Escape'&&ui.rules){ui.rules=false;render();return;}
     if((e.key==='Enter'||e.key===' ')&&e.target.matches('[data-cell],[data-wall]')){e.preventDefault();e.target.click();}
@@ -481,6 +574,15 @@
     if(cell){const [r,c]=cell.dataset.cell.split(',').map(Number);chooseCell(r,c);return;}
     const btn=e.target.closest('[data-action]');if(!btn)return;
     const action=btn.dataset.action;
+    if(action==='history'){toggleHistory(true);return;}
+    if(action==='close-history'){
+      if(btn.matches('button') || e.target===btn)toggleHistory(false);
+      return;
+    }
+    if(action==='undo'){
+      if(ui.room?.canUndo && (ui.local || isHost()))send('room:undo',{gameVersion:ui.room.gameVersion});
+      return;
+    }
     if(action==='close-rules'&&e.target.closest('.modal')&&e.target!==btn)return;
     if(action==='board-focus'){
       ui.focus=!ui.focus;render();
@@ -503,8 +605,8 @@
       const option=ui.pathChoices?.[Number(btn.dataset.path)];if(!option||!ui.selected)return;
       send('room:act',{type:'move',pieceId:ui.selected,to:option.to,breakEdge:option.breakEdge});ui.pathChoices=null;return;
     }
-    if(action==='local'){startLocal();return;}
-    if(action==='local-restart'){if(window.confirm('Restart this local duel?'))startLocal();return;}
+    if(action==='local'){startLocal(ui.localFormat);return;}
+    if(action==='local-restart'){if(window.confirm('Restart this local game?'))startLocal();return;}
     if(action==='create'){
       ui.name=(document.getElementById('home-name')?.value||ui.name||'Player').trim();localStorage.setItem('wallgo-name',ui.name);
       send('room:create',{name:ui.name,format:ui.format},onJoined);return;
@@ -524,13 +626,15 @@
       catch(_){window.prompt('Copy your invite link:',link);}
       return;
     }
-    if(action==='home') {e.preventDefault();if(ui.local && ui.room?.stage==='active' && !window.confirm('Return to mode selection and end this local game?'))return;ui.focus=false;ui.local=false;ui.room=null;ui.role=null;ui.id=null;ui.code='';history.replaceState({},'','/');render();}
+    if(action==='home') {e.preventDefault();if(ui.local && ui.room?.stage==='active' && !window.confirm('Return to mode selection and end this local game?'))return;ui.showHistory=false;ui.focus=false;ui.boardFull=false;ui.local=false;ui.room=null;ui.role=null;ui.id=null;ui.code='';history.replaceState({},'','/');render();}
   });
   if(initialCode)socket.connect();
   if('serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js',{updateViaCache:'none'}).then(async registration=>{
     await navigator.serviceWorker.ready;
+    ui.offlineReady=true;
     const status=document.getElementById('offline-status');
-    if(status)status.textContent='Ready for offline local play and reload.';
+    const message='Ready for offline local play and reload.';
+    if(status)status.textContent=globalThis.wallgoTranslate?.(message)||message;
   }).catch(()=>{});
   render();
 })();

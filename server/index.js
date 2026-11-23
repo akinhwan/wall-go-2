@@ -30,7 +30,10 @@ function plainName(s) {
   const trimmed=s.replace(/[<>\x00-\x1F]/g,'').trim().slice(0,24);
   return trimmed || 'Player';
 }
-function capacity(room) { return room.format==='duel'?2:3; }
+function capacity(room) { return rules.formatConfig(room.format).players; }
+function seatColor(room, index) {
+  return capacity(room)===2 && index===1 ? 2 : index;
+}
 function publicState(room) {
   const game=room.game;
   return {
@@ -39,6 +42,9 @@ function publicState(room) {
     players:room.players.map(p=>({id:p.id,name:p.name,color:p.color,connected:p.connected})),
     spectatorCount:room.spectators.size,
     game, currentId:game?rules.activePlayer(game):null,
+    gameVersion:room.gameVersion,
+    canUndo:rules.canUndo(game) || Boolean(room.qualifier),
+    qualifierHistory:room.qualifier?.history || null,
     legal:game?rules.optionsForTurn(game):{},
     territory:game?rules.territories(game):null,
     firstRound:room.firstRound,
@@ -49,6 +55,10 @@ function publicState(room) {
 function sendState(room) {
   room.lastActive=Date.now();
   io.to(room.code).emit('room:state',publicState(room));
+}
+function sendGameState(room) {
+  room.gameVersion++;
+  sendState(room);
 }
 function resultState(room) {
   const game=room.game;
@@ -113,23 +123,24 @@ function startGame(room) {
   if(room.players.length!==capacity(room)) throw new Error(`You need ${capacity(room)} players to start`);
   const players=room.players;
   room.game=rules.makeGame(players,room.format,1);
-  room.stage='active';room.firstRound=null;
-  sendState(room);
+  room.stage='active';room.firstRound=null;room.qualifier=null;
+  sendGameState(room);
 }
 function startFinal(room) {
   if(room.stage!=='between'||!room.firstRound||!room.game) throw new Error('The final is not ready yet');
   const order=room.firstRound.finalIds;
   const players=order.map(id=>room.players.find(p=>p.id===id));
+  room.qualifier=room.game;
   room.game=rules.makeGame(players,'duel',2);
   room.stage='active';
-  sendState(room);
+  sendGameState(room);
 }
 
 io.on('connection',socket=>{
   event(socket,'room:create',({name,format})=>{
-    if(format!=='duel'&&format!=='tournament') format='tournament';
+    if(!rules.formatConfig(format)) format='tournament';
     const room={code:code(),format,stage:'lobby',players:[],spectators:new Map(),
-      hostId:null,game:null,firstRound:null,chat:[],lastActive:Date.now()};
+      hostId:null,game:null,gameVersion:0,qualifier:null,firstRound:null,chat:[],lastActive:Date.now()};
     const player={id:crypto.randomUUID(),secret:token(),name:plainName(name),
       color:0,connected:true,socketId:socket.id};
     room.players.push(player);room.hostId=player.id;rooms.set(room.code,room);
@@ -148,7 +159,7 @@ io.on('connection',socket=>{
     if(room.stage==='lobby' && room.players.length<capacity(room)) {
       const index=room.players.length;
       player={id:crypto.randomUUID(),secret:token(),name:plainName(name),
-        color:room.format==='duel'?(index===0?0:2):index,connected:true,socketId:socket.id};
+        color:seatColor(room,index),connected:true,socketId:socket.id};
       room.players.push(player);attach(socket,room,player);
       return {code:room.code,id:player.id,token:player.secret,role:'player',state:publicState(room)};
     }
@@ -159,10 +170,11 @@ io.on('connection',socket=>{
   event(socket,'room:format',({format})=>{
     const room=requireRoom(socket);requireHost(socket,room);
     if(room.stage!=='lobby') throw new Error('Format can only be changed in the lobby');
-    if(!['duel','tournament'].includes(format)) throw new Error('Invalid format');
-    if(room.players.length>(format==='duel'?2:3)) throw new Error('Too many players for this format');
+    const config=rules.formatConfig(format);
+    if(!config) throw new Error('Invalid format');
+    if(room.players.length>config.players) throw new Error('Too many players for this format');
     room.format=format;
-    room.players.forEach((p,i)=>p.color=format==='duel'?(i===0?0:2):i);
+    room.players.forEach((p,i)=>p.color=seatColor(room,i));
     sendState(room);
   });
   event(socket,'room:start',()=>{const room=requireRoom(socket);requireHost(socket,room);if(room.stage!=='lobby')throw new Error('Already started');startGame(room);});
@@ -182,7 +194,24 @@ io.on('connection',socket=>{
       case 'wall':rules.buildWall(game,player.id,action.key);break;
       default:throw new Error('Unknown move');
     }
-    resultState(room);sendState(room);
+    resultState(room);sendGameState(room);
+  });
+  event(socket,'room:undo',({gameVersion})=>{
+    const room=requireRoom(socket);
+    const player=requireSeat(socket,room);
+    if(player.id!==room.hostId) throw new Error('Only the host can undo online');
+    if(gameVersion!==room.gameVersion) throw new Error('The game changed. Review the board and try again.');
+    if(rules.undoAction(room.game)) {
+      room.stage='active';
+      if(room.game.round===1) room.firstRound=null;
+    } else if(room.qualifier) {
+      room.game=room.qualifier;
+      room.qualifier=null;
+      room.stage='between';
+    } else {
+      throw new Error('No actions to undo');
+    }
+    sendGameState(room);
   });
   event(socket,'room:chat',({message})=>{
     const room=requireRoom(socket);
@@ -210,8 +239,8 @@ setInterval(()=>{
       rooms.delete(roomCode);continue;
     }
     if(room.stage!=='active'||!room.game||!room.game.deadline||now<room.game.deadline)continue;
-    try { rules.autoTurn(room.game);resultState(room);sendState(room); }
-    catch(err) {console.error('Auto-turn error',roomCode,err);room.game.deadline=Date.now()+rules.TURN_MS;sendState(room);}
+    try { rules.autoTurn(room.game);resultState(room);sendGameState(room); }
+    catch(err) {console.error('Auto-turn error',roomCode,err);room.game.deadline=Date.now()+rules.TURN_MS;sendGameState(room);}
   }
 },350).unref();
 

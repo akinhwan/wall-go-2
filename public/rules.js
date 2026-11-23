@@ -2,6 +2,14 @@
 
 const SIZE = 7;
 const TURN_MS = 90_000;
+const FORMATS = Object.freeze({
+  duel: {players:2, wallBreakers:false},
+  'breaker-duel': {players:2, wallBreakers:true},
+  tournament: {players:3, wallBreakers:true},
+  'four-player': {players:4, wallBreakers:true},
+});
+const formatConfig = mode => Object.hasOwn(FORMATS,mode) ? FORMATS[mode] : null;
+const undoStack = new WeakMap();
 const VECTORS = [[-1, 0], [1, 0], [0, -1], [0, 1]];
 const inside = (r, c) => r >= 0 && r < SIZE && c >= 0 && c < SIZE;
 const same = (a, b) => a.r === b.r && a.c === b.c;
@@ -17,15 +25,15 @@ function wallChoices(game, r, c) {
     .filter(key => key && !game.walls[key]);
 }
 
-function makeGame(players, mode = 'three', round = 1) {
-  if (![2, 3].includes(players.length)) throw new Error('Two or three players required');
+function makeGame(players, mode, round = 1) {
+  mode ??= Object.keys(FORMATS).find(key=>FORMATS[key].players===players.length);
+  const format = formatConfig(mode==='three' ? 'tournament' : mode);
+  if (!format || players.length!==format.players) throw new Error('Player count does not match the game format');
   const activeIds = players.map(p => p.id);
   const game = {
-    size: SIZE, mode, round, phase: 'placement', activeIds,
+    size: SIZE, mode, round, phase: 'placement', activeIds, wallBreakers: format.wallBreakers,
     pieces: [], walls: {}, breakersUsed: {},
-    placementOrder: players.length === 3
-      ? [activeIds[0],activeIds[1],activeIds[2],activeIds[2],activeIds[1],activeIds[0]]
-      : [activeIds[0],activeIds[1],activeIds[1],activeIds[0]],
+    placementOrder: [...activeIds,...activeIds.slice().reverse()],
     placementIndex: 0, turnIndex: 0, pendingWall: null, deadline: null,
     movesPlayed: 0, history: [], result: null,
   };
@@ -40,7 +48,41 @@ function makeGame(players, mode = 'three', round = 1) {
       }
     }
   }
+  undoStack.set(game,[]);
   return game;
+}
+
+function rememberAction(game) {
+  undoStack.get(game).push({
+    historyLength: game.history.length,
+    phase: game.phase,
+    pieces: game.pieces.map(piece=>({...piece})),
+    walls: {...game.walls},
+    breakersUsed: {...game.breakersUsed},
+    placementIndex: game.placementIndex,
+    turnIndex: game.turnIndex,
+    pendingWall: game.pendingWall,
+    movesPlayed: game.movesPlayed,
+    result: game.result,
+  });
+}
+
+function canUndo(game) {
+  return Boolean(undoStack.get(game)?.length);
+}
+
+function undoAction(game) {
+  const previous = undoStack.get(game)?.pop();
+  if (!previous) return false;
+  const {historyLength,...state} = previous;
+  Object.assign(game,state);
+  game.history.length = historyLength;
+  game.deadline = game.phase==='move' || game.phase==='wall' ? Date.now()+TURN_MS : null;
+  return true;
+}
+
+function canUseBreaker(game, owner) {
+  return game.wallBreakers && Object.hasOwn(game.breakersUsed,owner) && !game.breakersUsed[owner];
 }
 
 function activePlayer(game) {
@@ -55,15 +97,16 @@ function hasPiece(game, r, c, excludingId = null) {
 
 function placePiece(game, owner, kind, r, c) {
   if (game.phase !== 'placement' || activePlayer(game) !== owner) throw new Error('Not your placement turn');
-  if (!inside(r,c) || hasPiece(game,r,c)) throw new Error('Choose an empty square');
+  if (!Number.isInteger(r) || !Number.isInteger(c) || !inside(r,c) || hasPiece(game,r,c)) throw new Error('Choose an empty square');
   const two = game.activeIds.length === 2;
   if (two && kind !== 'square') throw new Error('Place a square counter in the duel');
   if (!['circle','square'].includes(kind)) throw new Error('Select a counter type');
   const owned = game.pieces.filter(p => p.owner === owner && p.kind === kind);
   if (owned.length >= (two ? (kind === 'square' ? 2 : 0) : 1)) throw new Error('That counter type has already been placed');
   const id = `${owner}-${kind}-${owned.length}`;
+  rememberAction(game);
   game.pieces.push({id,owner,kind,r,c});
-  game.history.push({kind:'place',owner,pieceId:id,r,c});
+  game.history.push({kind:'place',owner,pieceId:id,pieceKind:kind,r,c});
   game.placementIndex++;
   if (game.placementIndex >= game.placementOrder.length) {
     game.phase = 'move';
@@ -124,7 +167,7 @@ function optionsForTurn(game) {
   const id = activePlayer(game);
   const out = {};
   for (const p of game.pieces.filter(x => x.owner === id)) {
-    out[p.id] = legalMoves(game,p,!game.breakersUsed[id] && game.activeIds.length === 3);
+    out[p.id] = legalMoves(game,p,canUseBreaker(game,id));
   }
   return out;
 }
@@ -134,9 +177,10 @@ function movePiece(game, owner, pieceId, to, breakEdge = null) {
   const piece = game.pieces.find(p => p.id === pieceId && p.owner === owner);
   if (!piece) throw new Error('Select one of your counters');
   if (!to || !Number.isInteger(to.r) || !Number.isInteger(to.c)) throw new Error('Invalid destination');
-  const canBreak = game.activeIds.length === 3 && !game.breakersUsed[owner];
+  const canBreak = canUseBreaker(game,owner);
   const option = legalMoves(game,piece,canBreak).find(opt => same(opt.to,to) && opt.breakEdge === (breakEdge || null));
   if (!option) throw new Error('Illegal move: blocked, occupied, or wrong counter movement');
+  rememberAction(game);
   const from = {r:piece.r,c:piece.c};
   if (option.breakEdge) {
     delete game.walls[option.breakEdge];
@@ -145,7 +189,7 @@ function movePiece(game, owner, pieceId, to, breakEdge = null) {
   piece.r = to.r; piece.c = to.c;
   game.pendingWall = {owner,pieceId,from,to:{r:to.r,c:to.c},broken:option.breakEdge,path:option.path};
   game.phase = 'wall';
-  game.history.push({kind:'move',owner,pieceId,from,to,broken:option.breakEdge});
+  game.history.push({kind:'move',owner,pieceId,from,to:option.to,broken:option.breakEdge});
   return game;
 }
 
@@ -175,7 +219,7 @@ function territories(game) {
 }
 
 function anyLegalMove(game, owner) {
-  const canBreak = game.activeIds.length===3 && !game.breakersUsed[owner];
+  const canBreak = canUseBreaker(game,owner);
   return game.pieces.some(p=>p.owner===owner && legalMoves(game,p,canBreak).length>0);
 }
 
@@ -219,6 +263,7 @@ function buildWall(game, owner, key) {
   if (game.phase!=='wall' || activePlayer(game)!==owner || game.pendingWall?.owner!==owner) throw new Error('You must move before building');
   const {r,c} = game.pendingWall.to;
   if (!wallChoices(game,r,c).includes(key)) throw new Error('Choose an empty internal edge beside your moved counter');
+  rememberAction(game);
   game.walls[key] = {owner,turn:game.movesPlayed+1};
   game.history.push({kind:'wall',owner,key});
   game.movesPlayed++;
@@ -235,8 +280,9 @@ function autoTurn(game) {
     const possibilities = game.pieces.filter(p=>p.owner===owner).flatMap(p=>legalMoves(game,p,false).map(opt=>({piece:p,opt})));
     // Avoid spending a wall breaker automatically when running out of time.
     if (!possibilities.length) {
-      const breakMoves = game.pieces.filter(p=>p.owner===owner).flatMap(p=>legalMoves(game,p,!game.breakersUsed[owner] && game.activeIds.length===3).map(opt=>({piece:p,opt})));
+      const breakMoves = game.pieces.filter(p=>p.owner===owner).flatMap(p=>legalMoves(game,p,canUseBreaker(game,owner)).map(opt=>({piece:p,opt})));
       if (!breakMoves.length) {
+        rememberAction(game);
         game.history.push({kind:'skip',owner,reason:'Timer expired; no legal move'});
         advance(game);return;
       }
@@ -248,13 +294,16 @@ function autoTurn(game) {
   if (game.phase==='wall') {
     const {r,c}=game.pendingWall.to;
     const choices=wallChoices(game,r,c);
-    if (!choices.length) return resolveResult(game,true);
+    if (!choices.length) {
+      rememberAction(game);
+      return resolveResult(game,true);
+    }
     buildWall(game,owner,choices[Math.floor(Math.random()*choices.length)]);
     game.history.push({kind:'timeout',owner});
   }
 }
 
-const WallGoRules = {SIZE,TURN_MS,edgeKey,wallChoices,makeGame,activePlayer,hasPiece,placePiece,legalMoves,optionsForTurn,movePiece,territories,anyLegalMove,buildWall,autoTurn,resolveResult};
+const WallGoRules = {SIZE,TURN_MS,formatConfig,edgeKey,wallChoices,makeGame,canUndo,undoAction,canUseBreaker,activePlayer,hasPiece,placePiece,legalMoves,optionsForTurn,movePiece,territories,anyLegalMove,buildWall,autoTurn,resolveResult};
 
 if (typeof module !== 'undefined' && module.exports) module.exports = WallGoRules;
 else globalThis.WallGoRules = WallGoRules;

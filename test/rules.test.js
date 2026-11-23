@@ -107,3 +107,71 @@ test('timeout auto-completes a legal turn',()=>{
   assert.equal(g.movesPlayed,before+1);
   assert.equal(g.history.filter(x=>x.kind==='wall').length,1);
 });
+
+test('breaker formats allow one wall break per player and undo restores the original wall',()=>{
+  const four = [...people,{id:'green'}];
+  for(const [mode,players] of [['breaker-duel',people.slice(0,2)],['four-player',four]]) {
+    const g=R.makeGame(players,mode);
+    const order=players.map(p=>p.id);
+    assert.deepEqual(g.placementOrder,[...order,...order.slice().reverse()]);
+    placements(g);
+    assert.equal(g.pieces.length,8);
+    for(const {id} of players)assert.ok(R.canUseBreaker(g,id));
+    g.pieces=[{id:'sq',owner:'blue',kind:'square',r:3,c:3}];
+    const wall={owner:'yellow',turn:1};
+    g.walls['v:3:4']=wall;
+    const breakingMove=R.optionsForTurn(g).sq.find(option=>option.breakEdge==='v:3:4');
+    R.movePiece(g,'blue','sq',breakingMove.to,breakingMove.breakEdge);
+    assert.equal(g.walls['v:3:4'],undefined);
+    assert.equal(R.canUseBreaker(g,'blue'),false);
+    assert.equal(R.undoAction(g),true);
+    assert.equal(g.phase,'move');
+    assert.equal(g.pendingWall,null);
+    assert.deepEqual(g.walls['v:3:4'],wall);
+    assert.deepEqual([g.pieces[0].r,g.pieces[0].c],[3,3]);
+    assert.ok(R.canUseBreaker(g,'blue'));
+  }
+  assert.equal(R.canUseBreaker(R.makeGame(people.slice(0,2),'duel'),'blue'),false);
+});
+
+test('undo reopens a scored game and returns all the way to the original setup',()=>{
+  const g=R.makeGame(people.slice(0,2),'duel');
+  const opening=JSON.stringify(g);
+  placements(g);
+  // Leave the last gap in a barrier between the two players' counters.
+  for(const piece of g.pieces)piece.c=piece.owner==='blue'?1:5;
+  for(let r=0;r<7;r++)if(r!==4)g.walls[`v:${r}:3`]={owner:'yellow'};
+  const piece=g.pieces.find(p=>p.owner==='blue' && p.kind==='circle' && p.r===4);
+  R.movePiece(g,'blue',piece.id,{r:4,c:2});
+  R.buildWall(g,'blue','v:4:3');
+  assert.equal(g.phase,'finished');
+  assert.ok(g.result);
+
+  assert.ok(R.undoAction(g));
+  assert.equal(g.phase,'wall');
+  assert.equal(g.result,null);
+  assert.equal(g.pendingWall.pieceId,piece.id);
+  assert.equal(g.walls['v:4:3'],undefined);
+  assert.equal(g.history.at(-1).kind,'move');
+  assert.ok(g.deadline>Date.now());
+  assert.ok(R.undoAction(g));
+  assert.equal(g.phase,'move');
+  for(let i=0;i<4;i++)assert.ok(R.undoAction(g));
+  assert.equal(JSON.stringify(g),opening);
+  assert.equal(R.canUndo(g),false);
+  assert.equal(R.undoAction(g),false);
+});
+
+test('timeout preserves separate undo steps for its automatic move and wall',()=>{
+  const g=R.makeGame(people,'tournament');
+  placements(g);
+  R.autoTurn(g);
+  assert.equal(g.history.at(-1).kind,'timeout');
+  assert.ok(R.undoAction(g));
+  assert.equal(g.phase,'wall');
+  assert.equal(g.history.at(-1).kind,'move');
+  assert.ok(R.undoAction(g));
+  assert.equal(g.phase,'move');
+  assert.equal(R.activePlayer(g),'blue');
+  assert.equal(g.history.length,g.placementOrder.length);
+});
