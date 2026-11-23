@@ -38,6 +38,12 @@ This updated version recreates the close-up board aesthetic shown in the episode
 
 The visual design is original SVG and CSS artwork — **no photographs or screenshot images are used as the live board background**. Wall-piece stacks around the playing surface are decorative, not limited inventory counters. A static preview is in `assets/arena-board-preview.png`.
 
+## Touch and fullscreen board
+
+Touch devices automatically enter the board view when a game starts. The board fills the available screen while staying square; portrait and landscape layouts keep the current player, countdown and turn controls visible. Use **Exit Fullscreen** to return to the scoreboard and room controls, or **Fullscreen Board** to expand again. Browsers that support native fullscreen also hide their browser controls when the expand button is tapped; other browsers use the full page viewport.
+
+During wall placement, tap a highlighted edge or use the large **Top / Bottom / Left / Right wall** buttons. Only legal edges appear. These controls work in both local and online games.
+
 ## Local Duel and offline play
 
 Choose **Local Duel** on the home screen for two players sharing this device. No name, account, room, or connection is needed. The current player is shown above the board and highlighted on the scoreboard. Place squares in 1–2–2–1 order, then alternate full move-and-wall turns. New Game / Restart and Mode Selection are available throughout; leaving an unfinished game asks for confirmation.

@@ -9,7 +9,7 @@
   const query = new URLSearchParams(location.search);
   const initialCode = (query.get('room')||'').toUpperCase().replace(/[^A-Z2-9]/g,'').slice(0,6);
   const ui = {
-    local:false, room:null, id:null, token:null, role:null, code:initialCode,
+    focus:false, boardFull:false, local:false, room:null, id:null, token:null, role:null, code:initialCode,
     name:localStorage.getItem('wallgo-name')||'', joinCode:initialCode,
     format:'tournament',selected:null,kind:'square',breakMode:false,pathChoices:null,
     rules:false,toast:'',chatDraft:'',phaseKey:'',clockOffset:0,connected:false
@@ -30,6 +30,7 @@
   const moment = stamp => new Date(stamp).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
 
   function notify(msg) {
+    msg=globalThis.wallgoTranslate?.(msg)||msg;
     ui.toast=msg;render();
     clearTimeout(notify.timeout);
     notify.timeout=setTimeout(()=>{ui.toast='';render();},2800);
@@ -42,7 +43,9 @@
     ui.id=r.currentId||r.hostId;ui.selected=null;ui.pathChoices=null;ui.breakMode=false;
     ui.clockOffset=0;render();
   }
+  const touchLayout = () => globalThis.matchMedia?.('(max-width: 810px), (pointer: coarse)').matches || false;
   function startLocal() {
+    ui.focus=touchLayout();
     socket.disconnect();ui.local=true;ui.code='';ui.role='player';
     const players=[{id:'local-blue',name:'Player 1 · Blue',color:0,connected:true},
       {id:'local-pink',name:'Player 2 · Pink',color:2,connected:true}];
@@ -70,6 +73,7 @@
     });
   }
   function onJoined(reply) {
+    ui.focus=reply.state?.stage==='active' && touchLayout();
     ui.local=false;ui.role=reply.role;ui.id=reply.id;ui.token=reply.token;ui.code=reply.code;
     ui.room=reply.state;
     if(reply.token)localStorage.setItem(`wallgo-seat-${reply.code}`,JSON.stringify({token:reply.token,name:ui.name}));
@@ -97,6 +101,7 @@
     if(ui.local || !ui.room || ui.room.code!==room.code) return;
     const key=`${room.game?.phase}:${room.game?.placementIndex}:${room.game?.movesPlayed}:${room.currentId}:${room.game?.pendingWall?.pieceId}`;
     if(ui.phaseKey!==key){ui.selected=null;ui.breakMode=false;ui.pathChoices=null;ui.phaseKey=key;}
+    if(room.stage==='active' && ui.room?.stage!=='active')ui.focus=touchLayout();
     ui.clockOffset=room.serverNow-Date.now();
     ui.room=room;render();
   });
@@ -104,7 +109,7 @@
   function header() {
     return `<header class="topbar"><div class="container top-inner">
       <a class="logo" href="/" data-action="home" aria-label="Wall Go II home"><span class="logo-korean" lang="ko">벽바둑</span> <em>II</em><span class="logo-divider"></span><span class="logo-english">WALL / GO</span></a>
-      <div class="top-right"><span class="tag"><i></i>${ui.local?'LOCAL DUEL · OFFLINE':ui.room?'PRIVATE GAME':'CHOOSE YOUR MODE'}</span>
+      <div class="top-right"><button class="plain-link" data-action="language" aria-label="Change language">English / 한국어</button><span class="tag"><i></i>${ui.local?'LOCAL DUEL · OFFLINE':ui.room?'PRIVATE GAME':'CHOOSE YOUR MODE'}</span>
         <button class="plain-link" data-action="rules">HOW TO PLAY</button></div></div></header>`;
   }
   function footer() {
@@ -236,7 +241,7 @@
     }
     for(const key of wallOptions){const [x1,y1,x2,y2]=lineForEdge(key,T,M);
       out+=`<line class="wall-target" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#a8ffea" stroke-width="13" stroke-linecap="round" pointer-events="none" />
-        <line class="click-wall" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="transparent" stroke-width="36" data-wall="${key}" tabindex="0" role="button" aria-label="Build wall at ${key}"/>`;
+        <line class="click-wall" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="transparent" stroke-width="58" data-wall="${key}" tabindex="0" role="button" aria-label="Build wall at ${key}"/>`;
     }
     out+='</svg>';return out;
   }
@@ -283,6 +288,14 @@
     return `<div class="panel status-panel"><div><div class="overline">${escape(label)}</div><div class="status-heading">${escape(head)}</div><p class="status-desc">${escape(desc)}</p></div>
       ${timed?`<div class="clock" id="timer"><strong id="clock-text">${formatClock()}</strong><small>SECONDS LEFT</small><div class="timer-track"><span id="clock-bar" style="width:100%"></span></div></div>`:''}</div>`;
   }
+  function wallButtons() {
+    const g=ui.room?.game;
+    if(!myTurn()||g?.phase!=='wall')return '';
+    const {r,c}=g.pendingWall.to;
+    const names={};names[`h:${r}:${c}`]='Top';names[`h:${r+1}:${c}`]='Bottom';
+    names[`v:${r}:${c}`]='Left';names[`v:${r}:${c+1}`]='Right';
+    return `<div class="wall-buttons" aria-label="Build a wall beside the moved counter">${wallChoices(g,r,c).map(key=>`<button class="btn" data-wall="${key}">${names[key]} wall</button>`).join('')}</div>`;
+  }
   function tray() {
     const r=ui.room,g=r.game;
     if(r.stage==='lobby')return `<div class="panel action-tray"><div class="action-desc"><b>Ready to play?</b> ${r.players.length} of ${cap()} seats filled.</div>
@@ -308,7 +321,7 @@
       <div class="tray-controls">${canBreak?`<button class="breaker-btn ${ui.breakMode?'active':''}" data-action="breaker">${ui.breakMode?'✕ EXIT BREAK MODE':'⚒ USE WALL BREAKER'}</button>`:''}
       ${ui.selected&&myTurn()?'<button class="btn small ghost" data-action="cancel">CLEAR</button>':''}</div></div>`;
     }
-    if(g.phase==='wall')return `<div class="panel action-tray"><div class="action-desc"><b>${myTurn()?'YOUR WALL':'WALL IN PROGRESS'}</b><br/>Choose one of the glowing lines next to the moved piece. All walls block every player.</div></div>`;
+    if(g.phase==='wall')return `<div class="panel action-tray"><div class="action-desc"><b>${myTurn()?'YOUR WALL':'WALL IN PROGRESS'}</b><br/>Choose one of the glowing lines next to the moved piece. All walls block every player.</div>${wallButtons()}</div>`;
     return '';
   }
   function playerRows() {
@@ -360,11 +373,20 @@
       <button class="btn ghost full small" data-action="rules" style="margin-top:14px">VIEW COMPLETE RULES →</button></div>
     </aside>`;
   }
+  function focusedRoom() {
+    const r=ui.room,g=r.game;
+    return `<main class="focus-screen" aria-label="Fullscreen game board">
+      <div class="focus-header"><div class="focus-toolbar"><strong style="color:${getColor(r.currentId||r.hostId)}">${escape(playerById(r.currentId)?.name||'Match complete')}</strong><button class="btn small" data-action="board-focus">EXIT FULLSCREEN</button></div>${statusPanel()}</div>
+      <div class="focus-stage"><div class="board-frame">${boardSvg(g)}</div></div>
+      <div class="focus-controls">${g?.result?resultPanel():''}${tray()}</div>
+    </main>`;
+  }
   function roomScreen() {
+    if(ui.focus && ui.room.game)return focusedRoom();
     const r=ui.room;
     const g=r.game||previewGame();
-    return `<main class="game-content"><div class="container">${roomHeader()}
-      <div class="game-grid"><div class="game-center">${statusPanel()}
+    return `<main class="game-content"><div class="container">${roomHeader()}${r.game?'<button class="btn board-expand" data-action="board-focus">FULLSCREEN BOARD</button>':''}
+      <div class="game-grid"><div class="game-center ${ui.boardFull?'board-full':''}"><button class="btn small board-toggle" data-action="board-full">${ui.boardFull?'EXIT FULL SCREEN / 전체 화면 닫기':'FULL SCREEN / 전체 화면'}</button>${statusPanel()}
         <div class="board-wrap"><div class="arena-brand"><span>THE STRATEGY ARENA</span><strong lang="ko">벽바둑 <em>II</em></strong><span>07 × 07</span></div>
         <div class="arena-top-rack" aria-hidden="true">${Array.from({length:14},()=>'<i></i>').join('')}</div>
         <div class="arena-layout"><div class="arena-rack arena-rack-blue" aria-hidden="true">${Array.from({length:16},()=>'<i></i>').join('')}</div><div class="board-frame">${boardSvg(g, r.stage==='lobby')}</div><div class="arena-rack arena-rack-red" aria-hidden="true">${Array.from({length:16},()=>'<i></i>').join('')}</div></div>
@@ -395,7 +417,8 @@
   }
   function render() {
     const page=ui.room?roomScreen():home();
-    app.innerHTML=`<div class="app-shell">${header()}${page}${footer()}</div>${rulesModal()}${pathModal()}${ui.toast?`<div class="toast" role="status">${escape(ui.toast)}</div>`:''}`;
+    app.innerHTML=`<div class="app-shell ${ui.focus&&ui.room?'board-focused':''}">${header()}${page}${footer()}</div>${rulesModal()}${pathModal()}${ui.toast?`<div class="toast" role="status">${escape(ui.toast)}</div>`:''}`;
+    globalThis.wallgoLocalize?.(app);
     const log=document.getElementById('chat-log');if(log)log.scrollTop=log.scrollHeight;
     updateTimer();
   }
@@ -442,7 +465,11 @@
     const msg=ui.chatDraft.trim();if(!msg)return;
     send('room:chat',{message:msg},()=>{ui.chatDraft='';render();});
   });
+  document.addEventListener('fullscreenchange',()=>{
+    if(!document.fullscreenElement && ui.focus){ui.focus=false;render();}
+  });
   document.addEventListener('keydown',e=>{
+    if(e.key==='Escape' && ui.focus && !ui.rules && !ui.pathChoices){ui.focus=false;render();return;}
     if(e.key==='Escape'&&ui.rules){ui.rules=false;render();return;}
     if((e.key==='Enter'||e.key===' ')&&e.target.matches('[data-cell],[data-wall]')){e.preventDefault();e.target.click();}
     if(e.key==='Enter'&&e.target.id==='join-code'){e.preventDefault();document.querySelector('[data-action="join"]')?.click();}
@@ -455,6 +482,16 @@
     const btn=e.target.closest('[data-action]');if(!btn)return;
     const action=btn.dataset.action;
     if(action==='close-rules'&&e.target.closest('.modal')&&e.target!==btn)return;
+    if(action==='board-focus'){
+      ui.focus=!ui.focus;render();
+      try {
+        if(ui.focus && document.documentElement?.requestFullscreen)await document.documentElement.requestFullscreen();
+        else if(!ui.focus && document.fullscreenElement)await document.exitFullscreen();
+      }catch(_){} // The viewport layout also works where browser fullscreen is unavailable.
+      return;
+    }
+    if(action==='board-full'){ui.boardFull=!ui.boardFull;render();return;}
+    if(action==='language'){localStorage.setItem('wallgo-language',localStorage.getItem('wallgo-language')==='ko'?'en':'ko');render();return;}
     if(action==='rules'){ui.rules=true;render();return;}
     if(action==='close-rules'){ui.rules=false;render();return;}
     if(action==='format'){ui.format=btn.dataset.format;render();return;}
@@ -487,7 +524,7 @@
       catch(_){window.prompt('Copy your invite link:',link);}
       return;
     }
-    if(action==='home') {e.preventDefault();if(ui.local && ui.room?.stage==='active' && !window.confirm('Return to mode selection and end this local game?'))return;ui.local=false;ui.room=null;ui.role=null;ui.id=null;ui.code='';history.replaceState({},'','/');render();}
+    if(action==='home') {e.preventDefault();if(ui.local && ui.room?.stage==='active' && !window.confirm('Return to mode selection and end this local game?'))return;ui.focus=false;ui.local=false;ui.room=null;ui.role=null;ui.id=null;ui.code='';history.replaceState({},'','/');render();}
   });
   if(initialCode)socket.connect();
   if('serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js',{updateViaCache:'none'}).then(async registration=>{
