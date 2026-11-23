@@ -39,6 +39,9 @@ test('offline local duel supports setup, full turns, scoring, rematch and mode s
   const click=async(selector,dataset)=>handlers.click({preventDefault(){},target:{closest:s=>s===selector?{dataset}:null}});
   await click('[data-action]',{action:'local'});
   assert.match(root.innerHTML,/Player 1 · Blue · Opening setup/);
+  await click('[data-action]',{action:'board-focus'});
+  assert.match(root.innerHTML,/class="focus-screen"/);
+  assert.match(root.innerHTML,/EXIT FULLSCREEN/);
   // Invalid occupied opening square does not advance setup.
   await click('[data-cell]',{cell:'2,1'});
   assert.match(root.innerHTML,/Counter 1 of 4/);
@@ -47,8 +50,12 @@ test('offline local duel supports setup, full turns, scoring, rematch and mode s
   await click('[data-cell]',{cell:'0,0'});
   await click('[data-cell]',{cell:'0,1'});
   assert.match(root.innerHTML,/Build one wall/);
+  assert.match(root.innerHTML,/Bottom wall/);
+  assert.match(root.innerHTML,/id="clock-text"/);
   await click('[data-wall]',{wall:'h:1:1'});
   assert.match(root.innerHTML,/Player 2 · Pink · Turn 2/);
+  await click('[data-action]',{action:'board-focus'});
+  assert.match(root.innerHTML,/FULLSCREEN BOARD/);
   // Exercise timeout completion through a finished game and its result UI.
   for(let i=0;i<200 && !root.innerHTML.includes('FINAL TERRITORY');i++){
     now+=91000;intervals.forEach(fn=>fn());
